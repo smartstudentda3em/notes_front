@@ -2,49 +2,40 @@ import { useEffect, useRef, useState } from 'react';
 import { fetchDocumentBlob } from '../api/client.js';
 
 /**
- * PrintViewer — مكوّن طباعة مخفي.
- * يجلب الـ PDF كـ Blob (بجودة الـ Vector الأصلية) على أجزاء عبر HTTP Range،
- * يمرّره إلى Hidden Iframe، ثم يشغّل window.print() الأصلي للمتصفح مباشرة
- * على الملف الأصلي — دون تحويله إلى صورة ودون أي زر تحميل.
+ * PrintViewer — تجهيز وطباعة مذكرة PDF.
  *
- * ملاحظات متانة الطباعة:
- * - التحميل على أجزاء يعالج فشل تحميل الملفات الكبيرة على الشبكات الضعيفة.
- * - الـ iframe يأخذ أبعاداً حقيقية (A4) خارج الشاشة؛ فإطار بمقاس 0×0 يمنع
- *   عارض PDF المضمّن من التهيئة ويجعل print() يفشل.
- * - نمنح العارض مهلة بعد التحميل قبل الطباعة، مع إعادة محاولة وشبكة أمان زمنية.
- * - نعرض مؤشّر تقدّم مرئياً لأن التحميل قد يستغرق عدة ثوانٍ للملفات الكبيرة.
+ * يجلب الـ PDF كـ Blob على أجزاء (HTTP Range) — يعالج فشل تحميل الملفات الكبيرة —
+ * ثم يمرّره إلى iframe مخفي خارج الشاشة، ويطبع الملف الأصلي مباشرة (بلا ترسيم/تنزيل).
  *
- * onDone(): يُستدعى بعد إطلاق أمر الطباعة (لإخفاء اللودر).
+ * لماذا زرّ طباعة صريح؟ التحميل يستغرق ثوانٍ، فيضيع "تفعيل المستخدم" (transient
+ * activation) الناتج عن النقرة الأصلية؛ وEdge يخنق الطباعة التلقائية بلا تفعيل
+ * فيُسقِط النداء بصمت (لا نافذة ولا خطأ). لذا:
+ *   1) نحاول الطباعة تلقائياً فور الجهوزية (ينجح غالباً في Chrome)،
+ *   2) ونعرض زر "اطبع المذكرة" الذي توفّر نقرته تفعيلاً طازجاً يفتح النافذة فوراً
+ *      (المسار المضمون عبر كل المتصفحات) — دون كشف رابط قابل للتنزيل/المشاركة.
  */
 export default function PrintViewer({ documentId, admin = false, copies = 1, onDone, onError }) {
   const iframeRef = useRef(null);
-  const [pct, setPct] = useState(0);       // نسبة التحميل (0-100)
-  const [phase, setPhase] = useState('downloading'); // downloading | printing
+  const launchRef = useRef(null);
+  const [pct, setPct] = useState(0);
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
     let objectUrl = null;
     let cancelled = false;
-    let printed = false;
     const timers = [];
 
-    // محاولة تشغيل الطباعة مع إعادة المحاولة إن لم يكن العارض جاهزاً بعد
-    const launchPrint = (attempt = 0) => {
-      if (cancelled || printed) return;
+    const launch = () => {
       const win = iframeRef.current && iframeRef.current.contentWindow;
+      if (!win) return;
       try {
-        if (!win) throw new Error('frame-not-ready');
-        win.focus();
-        win.print(); // الطباعة المباشرة على الـ PDF الأصلي
-        printed = true;
-        onDone && onDone();
+        win.focus(); // حاسم في Edge
+        win.print(); // مسار PDFium الأصلي — جودة محفوظة، بلا زر تنزيل
       } catch (e) {
-        if (attempt < 4) {
-          timers.push(setTimeout(() => launchPrint(attempt + 1), 600));
-        } else {
-          onError && onError('تعذّر تشغيل الطباعة تلقائياً. أعد المحاولة من فضلك.');
-        }
+        /* قد يُخنَق بلا استثناء؛ الزر المرئي يبقى متاحاً للمستخدم */
       }
     };
+    launchRef.current = launch;
 
     (async () => {
       try {
@@ -58,18 +49,39 @@ export default function PrintViewer({ documentId, admin = false, copies = 1, onD
         });
         if (cancelled) return;
         setPct(100);
-        setPhase('printing');
 
-        // Blob URL محلي (blob:) — لا يمثّل رابطاً للسيرفر يمكن مشاركته/تنزيله
         objectUrl = URL.createObjectURL(blob);
         const iframe = iframeRef.current;
 
-        // امنح عارض PDF مهلة للتهيئة قبل استدعاء الطباعة (يهم الملفات الكبيرة)
-        iframe.onload = () => timers.push(setTimeout(() => launchPrint(0), 400));
-        iframe.src = objectUrl;
+        // مهلة تهيئة متدرّجة مع حجم الملف (عارض PDFium غير المتزامن يحتاج وقتاً أطول للملفات الكبيرة)
+        const sizeMB = blob.size / (1024 * 1024);
+        const baseDelay = Math.min(2600, 800 + Math.ceil(sizeMB) * 80);
+        let viewerLoaded = false;
 
-        // شبكة أمان: بعض المتصفحات لا تُطلق onload لعارض PDF المضمّن
-        timers.push(setTimeout(() => launchPrint(0), 2500));
+        iframe.onload = () => {
+          viewerLoaded = true;
+          // عند انتهاء نافذة الطباعة (في المتصفحات التي تُطلق afterprint) نُغلق الطبقة تلقائياً
+          try {
+            iframe.contentWindow.addEventListener('afterprint', () => {
+              if (!cancelled) onDone && onDone();
+            });
+          } catch (_) { /* عابر للأصل أحياناً — نتجاهل */ }
+        };
+        iframe.src = objectUrl + '#toolbar=0&navpanes=0';
+
+        // استطلاع الجاهزية ثم محاولة الطباعة التلقائية، مع إظهار زر الطباعة اليدوي كضمان
+        const startedAt = Date.now();
+        const poll = () => {
+          if (cancelled) return;
+          const waited = Date.now() - startedAt;
+          if ((viewerLoaded && waited >= baseDelay) || waited > 8000) {
+            setReady(true);       // يُظهر زر "اطبع المذكرة"
+            launch();             // محاولة تلقائية (تنجح غالباً في Chrome)
+            return;
+          }
+          timers.push(setTimeout(poll, 150));
+        };
+        poll();
       } catch (e) {
         if (!cancelled) onError && onError(e.message);
       }
@@ -78,27 +90,46 @@ export default function PrintViewer({ documentId, admin = false, copies = 1, onD
     return () => {
       cancelled = true;
       timers.forEach(clearTimeout);
-      // تحرير الذاكرة بعد الطباعة
       if (objectUrl) setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
     };
   }, [documentId]);
 
   return (
-    <div className="print-overlay" role="status" aria-live="polite">
+    <div className="print-overlay" role="dialog" aria-live="polite" aria-label="طباعة المذكرة">
       <div className="print-card">
-        <div className="print-spinner" aria-hidden="true" />
-        <div className="print-title">
-          {phase === 'downloading' ? 'جارٍ تجهيز المذكرة للطباعة…' : 'جارٍ فتح نافذة الطباعة…'}
-        </div>
-        {phase === 'downloading' && (
+        {!ready ? (
           <>
+            <div className="print-spinner" aria-hidden="true" />
+            <div className="print-title">جارٍ تجهيز المذكرة للطباعة…</div>
             <div className="print-bar"><span style={{ width: `${pct}%` }} /></div>
             <div className="print-pct">{pct}%</div>
+          </>
+        ) : (
+          <>
+            <div className="print-title">المذكرة جاهزة</div>
+            <div className="print-hint">
+              إذا لم تُفتح نافذة الطباعة تلقائياً، اضغط الزر التالي:
+            </div>
+            <button
+              type="button"
+              className="print-btn"
+              onClick={() => { launchRef.current && launchRef.current(); }}
+              autoFocus
+            >
+              🖨️ اطبع المذكرة
+            </button>
+            <button
+              type="button"
+              className="print-close"
+              onClick={() => { onDone && onDone(); }}
+            >
+              إغلاق
+            </button>
           </>
         )}
       </div>
 
-      {/* iframe بأبعاد حقيقية (A4) لكن خارج الشاشة وشفّاف — يهيّئ عارض PDF بشكل صحيح */}
+      {/* iframe بأبعاد A4 حقيقية لكن خارج الشاشة — يهيّئ عارض PDF بشكل صحيح ويبقى غير مرئي */}
       <iframe
         ref={iframeRef}
         title="print-frame"
@@ -111,7 +142,6 @@ export default function PrintViewer({ documentId, admin = false, copies = 1, onD
           border: 0,
           left: '-10000px',
           top: 0,
-          opacity: 0,
           pointerEvents: 'none',
         }}
       />
