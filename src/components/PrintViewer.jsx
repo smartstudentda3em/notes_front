@@ -3,21 +3,23 @@ import { fetchDocumentBlob } from '../api/client.js';
 
 /**
  * PrintViewer — مكوّن طباعة مخفي.
- * يجلب الـ PDF كـ Blob Stream (بجودة الـ Vector الأصلية 300+ DPI)،
+ * يجلب الـ PDF كـ Blob (بجودة الـ Vector الأصلية) على أجزاء عبر HTTP Range،
  * يمرّره إلى Hidden Iframe، ثم يشغّل window.print() الأصلي للمتصفح مباشرة
- * على الملف الأصلي — دون تحويله إلى صورة (Canvas/JPEG) ودون أي زر تحميل.
+ * على الملف الأصلي — دون تحويله إلى صورة ودون أي زر تحميل.
  *
  * ملاحظات متانة الطباعة:
+ * - التحميل على أجزاء يعالج فشل تحميل الملفات الكبيرة على الشبكات الضعيفة.
  * - الـ iframe يأخذ أبعاداً حقيقية (A4) خارج الشاشة؛ فإطار بمقاس 0×0 يمنع
- *   عارض PDF المضمّن في المتصفح من التهيئة ويجعل print() يفشل (خاصة للملفات الكبيرة).
- * - نمنح العارض مهلة قصيرة بعد التحميل قبل استدعاء الطباعة، مع إعادة محاولة،
- *   وشبكة أمان زمنية لأن بعض المتصفحات لا تُطلق onload لعارض PDF.
+ *   عارض PDF المضمّن من التهيئة ويجعل print() يفشل.
+ * - نمنح العارض مهلة بعد التحميل قبل الطباعة، مع إعادة محاولة وشبكة أمان زمنية.
+ * - نعرض مؤشّر تقدّم مرئياً لأن التحميل قد يستغرق عدة ثوانٍ للملفات الكبيرة.
  *
  * onDone(): يُستدعى بعد إطلاق أمر الطباعة (لإخفاء اللودر).
  */
 export default function PrintViewer({ documentId, admin = false, copies = 1, onDone, onError }) {
   const iframeRef = useRef(null);
-  const [status, setStatus] = useState('جارٍ تجهيز الطباعة...');
+  const [pct, setPct] = useState(0);       // نسبة التحميل (0-100)
+  const [phase, setPhase] = useState('downloading'); // downloading | printing
 
   useEffect(() => {
     let objectUrl = null;
@@ -34,7 +36,6 @@ export default function PrintViewer({ documentId, admin = false, copies = 1, onD
         win.focus();
         win.print(); // الطباعة المباشرة على الـ PDF الأصلي
         printed = true;
-        setStatus('تم فتح نافذة الطباعة.');
         onDone && onDone();
       } catch (e) {
         if (attempt < 4) {
@@ -47,21 +48,30 @@ export default function PrintViewer({ documentId, admin = false, copies = 1, onD
 
     (async () => {
       try {
-        const blob = await fetchDocumentBlob(documentId, { admin, copies });
+        const blob = await fetchDocumentBlob(documentId, {
+          admin,
+          copies,
+          onProgress: (loaded, total) => {
+            if (cancelled) return;
+            if (total > 0) setPct(Math.min(100, Math.round((loaded / total) * 100)));
+          },
+        });
         if (cancelled) return;
+        setPct(100);
+        setPhase('printing');
 
         // Blob URL محلي (blob:) — لا يمثّل رابطاً للسيرفر يمكن مشاركته/تنزيله
         objectUrl = URL.createObjectURL(blob);
         const iframe = iframeRef.current;
 
-        // امنح عارض PDF مهلة للتهيئة والعرض قبل استدعاء الطباعة (يهم الملفات الكبيرة)
+        // امنح عارض PDF مهلة للتهيئة قبل استدعاء الطباعة (يهم الملفات الكبيرة)
         iframe.onload = () => timers.push(setTimeout(() => launchPrint(0), 400));
         iframe.src = objectUrl;
 
         // شبكة أمان: بعض المتصفحات لا تُطلق onload لعارض PDF المضمّن
         timers.push(setTimeout(() => launchPrint(0), 2500));
       } catch (e) {
-        onError && onError(e.message);
+        if (!cancelled) onError && onError(e.message);
       }
     })();
 
@@ -74,8 +84,20 @@ export default function PrintViewer({ documentId, admin = false, copies = 1, onD
   }, [documentId]);
 
   return (
-    <div aria-hidden="true">
-      <span className="sr-only">{status}</span>
+    <div className="print-overlay" role="status" aria-live="polite">
+      <div className="print-card">
+        <div className="print-spinner" aria-hidden="true" />
+        <div className="print-title">
+          {phase === 'downloading' ? 'جارٍ تجهيز المذكرة للطباعة…' : 'جارٍ فتح نافذة الطباعة…'}
+        </div>
+        {phase === 'downloading' && (
+          <>
+            <div className="print-bar"><span style={{ width: `${pct}%` }} /></div>
+            <div className="print-pct">{pct}%</div>
+          </>
+        )}
+      </div>
+
       {/* iframe بأبعاد حقيقية (A4) لكن خارج الشاشة وشفّاف — يهيّئ عارض PDF بشكل صحيح */}
       <iframe
         ref={iframeRef}

@@ -111,56 +111,66 @@ const PDF_CHUNK = 2 * 1024 * 1024; // 2MB
  *
  * onProgress(loaded, total): اختياري لتحديث مؤشّر التقدّم.
  */
+const PDF_CHUNK_TIMEOUT = 25000; // مهلة لكل جزء (ms) — تقطع أي تعليق ثم نعيد المحاولة
+
 export async function fetchDocumentBlob(documentId, { admin = false, copies = 1, onProgress } = {}) {
   const token = tokenStore.get();
   const path = admin ? `/admin/documents/${documentId}/stream` : `/documents/${documentId}/stream`;
   const url = `${API_URL}${path}?copies=${encodeURIComponent(copies)}`;
   const auth = { Authorization: `Bearer ${token}` };
 
-  // طلب نطاق واحد مع إعادة محاولة (يعالج الانقطاعات العابرة)
+  // تحميل جزء واحد بالكامل (الترويسات + الجسم) تحت مهلة واحدة مع إعادة محاولة.
+  // نقرأ الجسم هنا داخل المهلة حتى لا يتعلّق التحميل للأبد على شبكة ضعيفة.
   async function fetchRange(start, end) {
     let lastErr;
     for (let attempt = 0; attempt < 3; attempt++) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), PDF_CHUNK_TIMEOUT);
       try {
         const res = await fetch(url, {
           headers: { ...auth, Range: `bytes=${start}-${end}` },
           cache: 'no-store',
+          signal: ctrl.signal,
         });
-        if (res.status === 401) throw new Error('انتهت الجلسة. سجّل الدخول من جديد.');
+        if (res.status === 401) throw Object.assign(new Error('انتهت الجلسة. سجّل الدخول من جديد.'), { fatal: true });
         if (res.status !== 206 && res.status !== 200) throw new Error('تعذّر جلب الملف للطباعة.');
-        return res;
+        const contentRange = res.headers.get('Content-Range') || '';
+        const status = res.status;
+        const buf = await res.arrayBuffer(); // ضمن نفس المهلة (يُلغى مع abort)
+        clearTimeout(timer);
+        return { status, buf, contentRange };
       } catch (e) {
+        clearTimeout(timer);
+        if (e && e.fatal) throw e;         // 401 → لا فائدة من إعادة المحاولة
         lastErr = e;
-        await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+        await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
       }
     }
     throw lastErr || new Error('تعذّر جلب الملف للطباعة.');
   }
 
   // الجزء الأول
-  let res = await fetchRange(0, PDF_CHUNK - 1);
+  let { status, buf, contentRange } = await fetchRange(0, PDF_CHUNK - 1);
 
-  // خادم لا يدعم النطاق → أعاد الملف كاملاً
-  if (res.status === 200) {
-    const buf = await res.arrayBuffer();
+  // خادم لا يدعم النطاق → أعاد الملف كاملاً دفعةً واحدة
+  if (status === 200) {
+    onProgress && onProgress(buf.byteLength, buf.byteLength);
     return new Blob([buf], { type: 'application/pdf' });
   }
 
-  // 206: احسب الحجم الكلي من Content-Range ثم أكمل باقي الأجزاء
-  const cr = res.headers.get('Content-Range') || '';
-  const total = parseInt(cr.split('/')[1], 10) || 0;
-  const parts = [await res.arrayBuffer()];
-  let start = parts[0].byteLength;
+  // 206: احسب الحجم الكلي من Content-Range ثم أكمل باقي الأجزاء بالتتابع
+  const total = parseInt(contentRange.split('/')[1], 10) || 0;
+  const parts = [buf];
+  let start = buf.byteLength;
   onProgress && onProgress(start, total);
 
   while (total ? start < total : true) {
-    res = await fetchRange(start, start + PDF_CHUNK - 1);
-    const buf = await res.arrayBuffer();
+    ({ status, buf, contentRange } = await fetchRange(start, start + PDF_CHUNK - 1));
     if (buf.byteLength === 0) break;
     parts.push(buf);
     start += buf.byteLength;
     onProgress && onProgress(start, total);
-    if (res.status === 200 || (!total && buf.byteLength < PDF_CHUNK)) break;
+    if (status === 200 || (!total && buf.byteLength < PDF_CHUNK)) break;
   }
 
   return new Blob(parts, { type: 'application/pdf' });
