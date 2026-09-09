@@ -1,8 +1,0 @@
-{
-  "rewrites": [
-    {
-      "source": "/pdf-api/:path*",
-      "destination": "https://notes.smartstudent.live/public/api/:path*"
-    }
-  ]
-}

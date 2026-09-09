@@ -96,33 +96,72 @@ export function uploadFile(path, formData, { onProgress } = {}) {
   });
 }
 
-/**
- * قاعدة تحميل ملف الـ PDF للطباعة.
- *
- * مهم: المتصفحات (Chrome/Edge) تحجب قراءة استجابة application/pdf عبر الأصول
- * عبر آلية ORB/CORB — حتى مع ترويسات CORS سليمة — فيظهر "Failed to fetch".
- * لذلك على الموقع المنشور نمرّ الطلب عبر بروكسي على *نفس أصل الموقع* (‎/pdf-api)
- * مُعرَّف في vercel.json، فيصبح الطلب same-origin ولا ينطبق عليه ORB إطلاقاً،
- * كما يبقى الـ Blob على نفس الأصل فتعمل الطباعة التلقائية داخل iframe.
- * محلياً (localhost) نستخدم قاعدة الـ API مباشرة.
- */
-function pdfBase() {
-  const local = typeof location !== 'undefined'
-    && /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
-  return local ? API_URL : '/pdf-api';
-}
+// حجم الجزء الواحد عند التحميل. صغير عمداً: تحميل ملف كبير (10+ ميجا) دفعةً
+// واحدة يُقطع على الشبكات الضعيفة/خلف بروكسي فحص فيظهر "Failed to fetch"،
+// بينما الأجزاء الصغيرة تنجح ثم نجمّعها.
+const PDF_CHUNK = 2 * 1024 * 1024; // 2MB
 
-export async function fetchDocumentBlob(documentId, { admin = false, copies = 1 } = {}) {
+/**
+ * تحميل مذكرة PDF للطباعة على أجزاء عبر طلبات النطاق (HTTP Range).
+ *
+ * السبب: على شبكات المستخدمين قد يفشل تحميل الملف الكبير دفعةً واحدة
+ * ("Failed to fetch")؛ فنحمّله على قطع صغيرة (كل قطعة تنجح) ثم نبني Blob
+ * واحداً بنوع application/pdf. الـ Blob محلي (blob:) على نفس أصل الصفحة،
+ * فتعمل الطباعة المباشرة داخل iframe دون كشف رابط قابل للتنزيل/المشاركة.
+ *
+ * onProgress(loaded, total): اختياري لتحديث مؤشّر التقدّم.
+ */
+export async function fetchDocumentBlob(documentId, { admin = false, copies = 1, onProgress } = {}) {
   const token = tokenStore.get();
   const path = admin ? `/admin/documents/${documentId}/stream` : `/documents/${documentId}/stream`;
-  const url = `${pdfBase()}${path}?copies=${encodeURIComponent(copies)}`;
-  const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const url = `${API_URL}${path}?copies=${encodeURIComponent(copies)}`;
+  const auth = { Authorization: `Bearer ${token}` };
 
-  if (!res.ok) throw new Error('تعذّر جلب الملف للطباعة.');
+  // طلب نطاق واحد مع إعادة محاولة (يعالج الانقطاعات العابرة)
+  async function fetchRange(start, end) {
+    let lastErr;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res = await fetch(url, {
+          headers: { ...auth, Range: `bytes=${start}-${end}` },
+          cache: 'no-store',
+        });
+        if (res.status === 401) throw new Error('انتهت الجلسة. سجّل الدخول من جديد.');
+        if (res.status !== 206 && res.status !== 200) throw new Error('تعذّر جلب الملف للطباعة.');
+        return res;
+      } catch (e) {
+        lastErr = e;
+        await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+      }
+    }
+    throw lastErr || new Error('تعذّر جلب الملف للطباعة.');
+  }
 
-  // نبني الـ Blob بنوع pdf صراحةً (الاستجابة عبر البروكسي قد تصل بنوع عام)
-  const buf = await res.arrayBuffer();
-  return new Blob([buf], { type: 'application/pdf' });
+  // الجزء الأول
+  let res = await fetchRange(0, PDF_CHUNK - 1);
+
+  // خادم لا يدعم النطاق → أعاد الملف كاملاً
+  if (res.status === 200) {
+    const buf = await res.arrayBuffer();
+    return new Blob([buf], { type: 'application/pdf' });
+  }
+
+  // 206: احسب الحجم الكلي من Content-Range ثم أكمل باقي الأجزاء
+  const cr = res.headers.get('Content-Range') || '';
+  const total = parseInt(cr.split('/')[1], 10) || 0;
+  const parts = [await res.arrayBuffer()];
+  let start = parts[0].byteLength;
+  onProgress && onProgress(start, total);
+
+  while (total ? start < total : true) {
+    res = await fetchRange(start, start + PDF_CHUNK - 1);
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength === 0) break;
+    parts.push(buf);
+    start += buf.byteLength;
+    onProgress && onProgress(start, total);
+    if (res.status === 200 || (!total && buf.byteLength < PDF_CHUNK)) break;
+  }
+
+  return new Blob(parts, { type: 'application/pdf' });
 }
