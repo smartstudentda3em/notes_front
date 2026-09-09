@@ -54,6 +54,48 @@ async function request(path, { method = 'GET', body, isForm = false } = {}, retr
  * ملاحظة مهمة: الطلب يتم عبر fetch (يحمل الـ Bearer) وليس عبر src للـ iframe،
  * لذلك لا يُكشف رابط قابل للتنزيل، ونحافظ على جودة الـ Vector الأصلية.
  */
+/**
+ * رفع ملف (multipart) عبر XMLHttpRequest للحصول على مؤشّر تقدّم حقيقي.
+ * fetch لا يدعم أحداث تقدّم الرفع، لذا نستخدم XHR لإظهار النسبة للمستخدم
+ * بدلاً من زر متجمّد أثناء رفع ملفات PDF الكبيرة.
+ */
+export function uploadFile(path, formData, { onProgress } = {}) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${API_URL}${path}`);
+
+    const token = tokenStore.get();
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    xhr.setRequestHeader('Accept', 'application/json');
+    // لا نضبط Content-Type يدوياً: XHR يضيف حدّ الـ multipart boundary تلقائياً.
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) {
+        onProgress(Math.round((e.loaded / e.total) * 100));
+      }
+    };
+
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch { /* قد يكون الردّ فارغاً */ }
+
+      if (xhr.status >= 200 && xhr.status < 300) return resolve(data);
+
+      if (xhr.status === 401) {
+        tokenStore.clear();
+        window.dispatchEvent(new Event('memos:unauthorized'));
+      }
+      const firstError = data.errors ? Object.values(data.errors)[0]?.[0] : null;
+      reject(new Error(firstError || data.message || 'تعذّر رفع الملف.'));
+    };
+
+    xhr.onerror = () => reject(new Error('انقطع الاتصال أثناء الرفع. تحقّق من الشبكة وحاول مجدداً.'));
+    xhr.ontimeout = () => reject(new Error('انتهت مهلة الرفع. حاول بملف أصغر أو باتصال أفضل.'));
+
+    xhr.send(formData);
+  });
+}
+
 export async function fetchDocumentBlob(documentId, { admin = false, copies = 1 } = {}) {
   const token = tokenStore.get();
   const path = admin ? `/admin/documents/${documentId}/stream` : `/documents/${documentId}/stream`;

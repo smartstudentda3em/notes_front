@@ -419,3 +419,9 @@ table.logs td .copies { font-weight: 800; font-variant-numeric: tabular-nums; co
 .center-screen { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
 .auth-card { width: 100%; max-width: 400px; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
+
+/* مؤشّر تقدّم رفع المذكرة (داخل بطاقة المادة) */
+.upload-progress { display: inline-flex; align-items: center; gap: 10px; min-width: 200px; }
+.upload-progress-bar { position: relative; flex: 1; height: 8px; border-radius: 999px; background: var(--primary-weak); overflow: hidden; }
+.upload-progress-fill { position: absolute; inset: 0 auto 0 0; height: 100%; background: var(--primary); border-radius: 999px; transition: width .2s ease; }
+.upload-progress-label { font-size: 12.5px; font-weight: 700; color: var(--primary); white-space: nowrap; font-variant-numeric: tabular-nums; }

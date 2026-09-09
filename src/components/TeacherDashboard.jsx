@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { api } from '../api/client.js';
+import { api, uploadFile } from '../api/client.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import PrintViewer from './PrintViewer.jsx';
 import BookletCard from './BookletCard.jsx';
@@ -64,11 +64,17 @@ function MemosView({ tree, stages, reload, notify }) {
     addSubject: wrap(async (classId, name) => { await api('/subjects', { method: 'POST', body: { class_id: classId, name } }); notify('تمت إضافة المادة.'); }),
     delSubject: wrap(async (id) => { await api(`/subjects/${id}`, { method: 'DELETE' }); notify('تم حذف المادة.'); }),
     reorderSubjects: wrap(async (classId, ids) => { await api('/subjects/reorder', { method: 'POST', body: { class_id: classId, ids } }); }),
-    upload: wrap(async (subjectId, file) => {
-      if (file.type !== 'application/pdf') throw new Error('يُقبل ملف PDF فقط.');
+    // الرفع مع مؤشّر تقدّم حقيقي + حدّ حجم فوري (يتجنّب رفع ملف كامل ثم رفضه)
+    upload: async (subjectId, file, onProgress) => {
+      if (file.type !== 'application/pdf') { notify('يُقبل ملف PDF فقط.'); return; }
+      if (file.size > 50 * 1024 * 1024) { notify('أقصى حجم للملف 50 ميجابايت. قلّل جودة المسح الضوئي ثم أعد المحاولة.'); return; }
       const form = new FormData(); form.append('file', file);
-      await api(`/subjects/${subjectId}/document`, { method: 'POST', body: form, isForm: true }); notify('تم حفظ المذكرة.');
-    }),
+      try {
+        await uploadFile(`/subjects/${subjectId}/document`, form, { onProgress });
+        notify('تم حفظ المذكرة.');
+        reload();
+      } catch (e) { notify(e.message); }
+    },
     delDoc: wrap(async (id) => { await api(`/documents/${id}`, { method: 'DELETE' }); notify('تم حذف الملف.'); }),
     print: (id) => setPrintId(id),
   };
@@ -228,18 +234,31 @@ function ClassPanel({ stage, cls, allClasses, subjectMatches, searchActive, H, c
 function SubjectRow({ sub, idx, total, onMove, searchActive, H, confirmDel }) {
   const fileRef = useRef(null);
   const hasDoc = !!sub.document;
+  const [progress, setProgress] = useState(null); // null = خامل، 0..100 = جارٍ الرفع
+  const uploading = progress !== null;
 
-  const reorder = !searchActive ? (
+  async function handleFile(f) {
+    setProgress(0);
+    await H.upload(sub.id, f, (p) => setProgress(p));
+    setProgress(null);
+  }
+
+  const reorder = !searchActive && !uploading ? (
     <span className="reorder">
       <button className="iconbtn" title="أعلى" disabled={idx === 0} onClick={() => onMove('up')}>▲</button>
       <button className="iconbtn" title="أسفل" disabled={idx === total - 1} onClick={() => onMove('down')}>▼</button>
     </span>
   ) : null;
 
-  const actions = (
+  const actions = uploading ? (
+    <span className="upload-progress" aria-live="polite">
+      <span className="upload-progress-bar"><span className="upload-progress-fill" style={{ width: `${progress}%` }} /></span>
+      <span className="upload-progress-label">{progress < 100 ? `جارٍ الرفع… ${progress}%` : 'جارٍ الحفظ…'}</span>
+    </span>
+  ) : (
     <>
       <input type="file" accept="application/pdf" ref={fileRef} style={{ display: 'none' }}
-        onChange={(e) => { const f = e.target.files[0]; if (f) H.upload(sub.id, f); e.target.value = ''; }} />
+        onChange={(e) => { const f = e.target.files[0]; if (f) handleFile(f); e.target.value = ''; }} />
       {hasDoc ? (
         <>
           <button className="btn success sm" onClick={() => H.print(sub.document.id)}>🖨️ طباعة</button>
