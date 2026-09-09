@@ -96,18 +96,33 @@ export function uploadFile(path, formData, { onProgress } = {}) {
   });
 }
 
+/**
+ * قاعدة تحميل ملف الـ PDF للطباعة.
+ *
+ * مهم: المتصفحات (Chrome/Edge) تحجب قراءة استجابة application/pdf عبر الأصول
+ * عبر آلية ORB/CORB — حتى مع ترويسات CORS سليمة — فيظهر "Failed to fetch".
+ * لذلك على الموقع المنشور نمرّ الطلب عبر بروكسي على *نفس أصل الموقع* (‎/pdf-api)
+ * مُعرَّف في vercel.json، فيصبح الطلب same-origin ولا ينطبق عليه ORB إطلاقاً،
+ * كما يبقى الـ Blob على نفس الأصل فتعمل الطباعة التلقائية داخل iframe.
+ * محلياً (localhost) نستخدم قاعدة الـ API مباشرة.
+ */
+function pdfBase() {
+  const local = typeof location !== 'undefined'
+    && /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+  return local ? API_URL : '/pdf-api';
+}
+
 export async function fetchDocumentBlob(documentId, { admin = false, copies = 1 } = {}) {
   const token = tokenStore.get();
   const path = admin ? `/admin/documents/${documentId}/stream` : `/documents/${documentId}/stream`;
-  const base = `${path}?copies=${encodeURIComponent(copies)}`;
-  const res = await fetch(`${API_URL}${base}`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/pdf',
-    },
+  const url = `${pdfBase()}${path}?copies=${encodeURIComponent(copies)}`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
   });
 
   if (!res.ok) throw new Error('تعذّر جلب الملف للطباعة.');
 
-  return await res.blob(); // application/pdf
+  // نبني الـ Blob بنوع pdf صراحةً (الاستجابة عبر البروكسي قد تصل بنوع عام)
+  const buf = await res.arrayBuffer();
+  return new Blob([buf], { type: 'application/pdf' });
 }
