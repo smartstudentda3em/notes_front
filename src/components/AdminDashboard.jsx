@@ -44,7 +44,11 @@ export default function AdminDashboard() {
 
   const tabs = [
     { id: 'teachers', label: 'المدرسون' },
-    ...(isAdmin ? [{ id: 'assistants', label: 'المساعدون' }, { id: 'prints', label: 'النسخ المطبوعة' }] : []),
+    ...(isAdmin ? [
+      { id: 'assistants', label: 'المساعدون' },
+      { id: 'viewers', label: 'المشاهدون' },
+      { id: 'prints', label: 'النسخ المطبوعة' },
+    ] : []),
     { id: 'account', label: 'إعداداتي' },
   ];
 
@@ -61,6 +65,7 @@ export default function AdminDashboard() {
           : <TeacherDetail key={current.id} teacher={current} tree={tree} onBack={back} onPrint={doPrint} />
       )}
       {tab === 'assistants' && isAdmin && <AssistantsPanel notify={show} askConfirm={askConfirm} />}
+      {tab === 'viewers' && isAdmin && <ViewersPanel notify={show} askConfirm={askConfirm} />}
       {tab === 'prints' && isAdmin && <PrintLogsPanel teachers={teachers} notify={show} />}
       {tab === 'account' && <AdminAccount user={user} onUpdated={setUser} notify={show} />}
 
@@ -411,6 +416,183 @@ function AssistantCard({ a, teachers, teacherName, onChanged, askConfirm }) {
           message: <>هل أنت متأكد من حذف المساعد <b>{a.name}</b> نهائياً؟</>,
           confirmLabel: 'حذف المساعد',
           onConfirm: () => call(() => api(`/admin/assistants/${a.id}`, { method: 'DELETE' }), 'تم حذف المساعد.'),
+        })}>حذف</button>
+      </div>
+    </div>
+  );
+}
+
+/* =====================================================================
+ |  المشاهدون المقيّدون (إدارة — مدير المطبعة فقط)
+ ===================================================================== */
+function ViewersPanel({ notify, askConfirm }) {
+  const [viewers, setViewers] = useState([]);
+  const [teachers, setTeachers] = useState([]);
+  const [adding, setAdding] = useState(false);
+
+  async function load() {
+    try {
+      const [v, t] = await Promise.all([api('/admin/viewers'), api('/admin/teachers')]);
+      setViewers(v); setTeachers(t);
+    } catch (e) { notify(e.message); }
+  }
+  useEffect(() => { load(); }, []);
+
+  return (
+    <>
+      <div className="crumb"><span className="crumb-here">المشاهدون</span></div>
+      <div className="toolbar"><div className="between">
+        <span className="muted small">حسابات عرض فقط: كل مشاهد مربوط بمدرّس واحد ويرى المواد المسموح بها فقط (بلا تحميل/طباعة).</span>
+        <button className="btn" onClick={() => setAdding(true)}>+ إضافة مشاهد</button>
+      </div></div>
+
+      {adding && <ViewerForm teachers={teachers} onClose={() => setAdding(false)} onSaved={() => { setAdding(false); load(); notify('تم إنشاء المشاهد.'); }} />}
+
+      <div className="stack">
+        {viewers.map((v) => (
+          <ViewerCard key={v.id} v={v} teachers={teachers} askConfirm={askConfirm} onChanged={(m) => { load(); notify(m); }} />
+        ))}
+        {!viewers.length && <div className="empty-note">لا يوجد مشاهدون بعد.</div>}
+      </div>
+    </>
+  );
+}
+
+function ViewerForm({ teachers, initial, onClose, onSaved }) {
+  const editing = !!initial;
+  const [name, setName] = useState(initial?.name || '');
+  const [phone, setPhone] = useState(initial?.phone || '');
+  const [password, setPassword] = useState('');
+  const [teacherId, setTeacherId] = useState(initial?.teacher_id || '');
+  const [subjectIds, setSubjectIds] = useState(initial?.subject_ids || []);
+
+  async function submit(e) {
+    e.preventDefault();
+    if (!teacherId) { alert('اختر المدرّس المربوط.'); return; }
+    try {
+      if (editing) {
+        await api(`/admin/viewers/${initial.id}`, { method: 'PUT', body: { name, phone, teacher_id: Number(teacherId) } });
+        await api(`/admin/viewers/${initial.id}/permissions`, { method: 'PUT', body: { subject_ids: subjectIds } });
+      } else {
+        await api('/admin/viewers', { method: 'POST', body: { name, phone, password, teacher_id: Number(teacherId), subject_ids: subjectIds } });
+      }
+      onSaved();
+    } catch (ex) { alert(ex.message); }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <form className="card stack modal" onSubmit={submit}>
+        <div className="between"><h3>{editing ? 'تعديل مشاهد' : 'مشاهد جديد'}</h3><button type="button" className="btn ghost sm" onClick={onClose}>إغلاق</button></div>
+        <input className="field" placeholder="الاسم" value={name} onChange={(e) => setName(e.target.value)} required />
+        <input className="field" placeholder="رقم التليفون (اسم الدخول)" value={phone} onChange={(e) => setPhone(e.target.value)} required />
+        {!editing && <input className="field" placeholder="كلمة المرور المبدئية" value={password} onChange={(e) => setPassword(e.target.value)} required />}
+
+        <div>
+          <label>المدرّس المربوط</label>
+          <select className="field" value={teacherId} onChange={(e) => { setTeacherId(e.target.value); setSubjectIds([]); }} required>
+            <option value="">— اختر المدرّس —</option>
+            {teachers.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+          {editing && <div className="muted small" style={{ marginTop: 4 }}>تغيير المدرّس يمسح الصلاحيات السابقة.</div>}
+        </div>
+
+        <div>
+          <label>المواد المسموح بها (المادة × الصف)</label>
+          {teacherId
+            ? <SubjectMatrixPicker teacherId={Number(teacherId)} value={subjectIds} onChange={setSubjectIds} />
+            : <div className="muted small">اختر المدرّس أولاً لعرض مواده.</div>}
+        </div>
+
+        <button className="btn">{editing ? 'حفظ' : 'إنشاء الحساب'}</button>
+      </form>
+    </div>
+  );
+}
+
+function SubjectMatrixPicker({ teacherId, value, onChange }) {
+  const [tree, setTree] = useState(null);
+  const [err, setErr] = useState('');
+  useEffect(() => {
+    let alive = true;
+    setTree(null); setErr('');
+    api(`/admin/teachers/${teacherId}/tree`)
+      .then((t) => { if (alive) setTree(t || []); })
+      .catch((e) => { if (alive) setErr(e.message); });
+    return () => { alive = false; };
+  }, [teacherId]);
+
+  const set = new Set(value);
+  const toggle = (id) => {
+    const next = new Set(set);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    onChange([...next]);
+  };
+
+  if (err) return <div className="muted small danger">{err}</div>;
+  if (!tree) return <div className="muted small">جارٍ تحميل مواد المدرّس…</div>;
+  const empty = !tree.some((s) => s.classes?.some((c) => c.subjects?.length));
+  if (empty) return <div className="muted small">لا توجد مواد لهذا المدرّس بعد.</div>;
+
+  return (
+    <div className="matrix-picker">
+      {tree.map((stage) => (
+        <div key={stage.stage} className="mp-stage">
+          <div className="mp-stage-t">{stage.stage}</div>
+          {stage.classes.map((cls) => (
+            cls.subjects?.length ? (
+              <div key={cls.id} className="mp-class">
+                <div className="mp-class-t">{cls.name}</div>
+                <div className="mp-subjects">
+                  {cls.subjects.map((sub) => (
+                    <label key={sub.id} className={`mp-item ${set.has(sub.id) ? 'on' : ''}`}>
+                      <input type="checkbox" checked={set.has(sub.id)} onChange={() => toggle(sub.id)} />
+                      <span>{sub.name}{!sub.document && <em className="muted"> (لا مذكرة)</em>}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            ) : null
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ViewerCard({ v, teachers, onChanged, askConfirm }) {
+  const [editing, setEditing] = useState(false);
+  const call = async (fn, ok) => { try { await fn(); onChanged(ok); } catch (e) { onChanged(e.message); } };
+
+  return (
+    <div className="teacher-item">
+      <div className="between" style={{ alignItems: 'flex-start' }}>
+        <div className="hd">
+          <span className="avatar">👁️</span>
+          <div style={{ minWidth: 0 }}>
+            <div className="nm">{v.name} {!v.is_active && <span className="mini-pill off">موقوف</span>}</div>
+            <div className="ph">{v.phone}</div>
+          </div>
+        </div>
+        <span className="status ok">مشاهد مقيّد</span>
+      </div>
+
+      <div className="small" style={{ marginTop: 10 }}>
+        <div><span className="muted">المدرّس المربوط: </span>{v.teacher_name || '—'}</div>
+        <div style={{ marginTop: 4 }}><span className="muted">عدد المواد المسموح بها: </span>{(v.subject_ids || []).length}</div>
+      </div>
+
+      {editing && <ViewerForm teachers={teachers} initial={v} onClose={() => setEditing(false)} onSaved={() => { setEditing(false); onChanged('تم تحديث المشاهد.'); }} />}
+
+      <div className="row" style={{ marginTop: 12 }}>
+        <button className="btn soft sm" onClick={() => setEditing(true)}>تعديل الصلاحيات</button>
+        <button className="btn ghost sm" onClick={() => { const password = prompt(`كلمة مرور جديدة لـ ${v.name}:`); if (password) call(() => api(`/admin/viewers/${v.id}/password`, { method: 'PUT', body: { password } }), 'تمت إعادة التعيين.'); }}>كلمة المرور</button>
+        <button className="btn ghost sm" onClick={() => call(() => api(`/admin/viewers/${v.id}/toggle`, { method: 'PATCH' }), v.is_active ? 'تم الإيقاف.' : 'تم التفعيل.')}>{v.is_active ? 'إيقاف' : 'تفعيل'}</button>
+        <button className="btn danger sm" onClick={() => askConfirm({
+          title: 'تأكيد حذف المشاهد',
+          message: <>هل أنت متأكد من حذف المشاهد <b>{v.name}</b> نهائياً؟</>,
+          confirmLabel: 'حذف المشاهد',
+          onConfirm: () => call(() => api(`/admin/viewers/${v.id}`, { method: 'DELETE' }), 'تم حذف المشاهد.'),
         })}>حذف</button>
       </div>
     </div>

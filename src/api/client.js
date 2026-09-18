@@ -175,3 +175,51 @@ export async function fetchDocumentBlob(documentId, { admin = false, copies = 1,
 
   return new Blob(parts, { type: 'application/pdf' });
 }
+
+/* =====================================================================
+ |  المشاهد المقيّد (Restricted Viewer): قائمة مفلترة + صور صفحات محمية
+ ===================================================================== */
+
+/** شجرة المحتوى المسموح بها للمشاهد (مفلترة من الخادم). */
+export function fetchViewerTree() {
+  return api('/viewer/tree');
+}
+
+/** بيانات مذكرة للعرض (عدد الصفحات). */
+export function fetchViewerMeta(documentId) {
+  return api(`/viewer/documents/${documentId}/meta`);
+}
+
+/**
+ * جلب صورة صفحة واحدة (PNG مختوم بعلامة مائية) كـ Blob عبر Bearer.
+ * تُرسم على canvas (لا <img src> مباشر، لا رابط قابل للمشاركة/التنزيل).
+ */
+export async function fetchViewerPage(documentId, page) {
+  const token = tokenStore.get();
+  let lastErr;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 25000);
+    try {
+      const res = await fetch(`${API_URL}/viewer/documents/${documentId}/page/${page}`, {
+        headers: { Authorization: `Bearer ${token}`, Accept: 'image/png' },
+        cache: 'no-store',
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+      if (res.status === 401) {
+        tokenStore.clear();
+        window.dispatchEvent(new Event('memos:unauthorized'));
+        throw Object.assign(new Error('انتهت الجلسة. سجّل الدخول من جديد.'), { fatal: true });
+      }
+      if (!res.ok) throw new Error('تعذّر تحميل الصفحة.');
+      return await res.blob();
+    } catch (e) {
+      clearTimeout(timer);
+      if (e && e.fatal) throw e;
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+    }
+  }
+  throw lastErr || new Error('تعذّر تحميل الصفحة.');
+}
