@@ -508,13 +508,6 @@ body.viewer-open { user-select: none; -webkit-user-select: none; }
   border: 1px solid var(--line); box-shadow: var(--shadow);
   -webkit-user-drag: none; user-drag: none; pointer-events: none;
 }
-/* علامة مائية أمامية فوق الصورة */
-.pv-watermark {
-  position: absolute; inset: 0; overflow: hidden; pointer-events: none;
-  display: flex; flex-wrap: wrap; gap: 60px 80px; transform: rotate(-30deg) scale(1.4);
-  align-content: center; justify-content: center;
-}
-.pv-watermark span { color: rgba(120,120,120,.18); font-size: 15px; font-weight: 700; white-space: nowrap; }
 .pv-loading {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
   background: rgba(255,255,255,.35); font-weight: 700; color: var(--text);

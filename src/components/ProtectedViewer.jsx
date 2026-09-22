@@ -2,13 +2,16 @@ import { useEffect, useRef, useState } from 'react';
 import { fetchViewerMeta, fetchViewerPage } from '../api/client.js';
 
 /**
- * عارض مذكرة محمي للمشاهد المقيّد: يعرض كل صفحة كصورة PNG (مختومة بعلامة مائية من
- * الخادم) مرسومة على <canvas> — لا ملف PDF كامل، لا رابط مباشر، لا زر تنزيل/طباعة.
- * طبقات ردع: منع كليك-يمين، منع التحديد/السحب، منع Ctrl+P/S/C وتفريغ الطباعة،
- * وعلامة مائية أمامية إضافية (اسم + هاتف) فوق الصورة.
+ * عارض مذكرة محمي للمشاهد المقيّد: يعرض كل صفحة كصورة PNG مختومة بعلامة مائية
+ * (اسم المشاهد، من الخادم) مرسومة على <canvas> — لا ملف PDF، لا رابط مباشر، لا تنزيل.
+ *
+ * الأداء: كاش صور الصفحات في الذاكرة + جلب مسبق (prefetch) للصفحة التالية/السابقة،
+ * فيصبح التنقّل فورياً بعد أول عرض.
+ * طبقات ردع: منع كليك-يمين، منع التحديد/السحب، منع Ctrl+P/S/C/U وتفريغ الطباعة.
  */
-export default function ProtectedViewer({ documentId, title, viewerName, viewerPhone, onClose }) {
+export default function ProtectedViewer({ documentId, title, onClose }) {
   const canvasRef = useRef(null);
+  const cacheRef = useRef(new Map()); // page -> { url, img }
   const [pages, setPages] = useState(0);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
@@ -23,7 +26,7 @@ export default function ProtectedViewer({ documentId, title, viewerName, viewerP
         e.stopPropagation();
       }
     };
-    const blockPrint = (e) => { e.preventDefault(); };
+    const blockPrint = (e) => e.preventDefault();
     window.addEventListener('keydown', onKey, true);
     window.addEventListener('beforeprint', blockPrint);
     document.body.classList.add('viewer-open');
@@ -33,6 +36,32 @@ export default function ProtectedViewer({ documentId, title, viewerName, viewerP
       document.body.classList.remove('viewer-open');
     };
   }, []);
+
+  // تفريغ كاش الصور عند تغيير المذكرة أو عند الخروج
+  useEffect(() => {
+    const cache = cacheRef.current;
+    return () => {
+      cache.forEach((e) => { try { URL.revokeObjectURL(e.url); } catch (_) { /* */ } });
+      cache.clear();
+    };
+  }, [documentId]);
+
+  // جلب صفحة (مع الكاش) — يعيد {url, img} جاهزاً للرسم
+  async function getPage(p) {
+    const cache = cacheRef.current;
+    if (cache.has(p)) return cache.get(p);
+    const blob = await fetchViewerPage(documentId, p);
+    const url = URL.createObjectURL(blob);
+    const img = await new Promise((resolve, reject) => {
+      const im = new Image();
+      im.onload = () => resolve(im);
+      im.onerror = () => reject(new Error('تعذّر عرض الصفحة.'));
+      im.src = url;
+    });
+    const entry = { url, img };
+    cache.set(p, entry);
+    return entry;
+  }
 
   // جلب عدد الصفحات
   useEffect(() => {
@@ -45,39 +74,32 @@ export default function ProtectedViewer({ documentId, title, viewerName, viewerP
     return () => { alive = false; };
   }, [documentId]);
 
-  // رسم الصفحة الحالية على الـ canvas
+  // رسم الصفحة الحالية + جلب مسبق للجيران
   useEffect(() => {
     if (!pages) return;
     let alive = true;
-    let objectUrl = null;
     setLoading(true); setError('');
 
-    fetchViewerPage(documentId, page)
-      .then((blob) => new Promise((resolve, reject) => {
-        if (!alive) return resolve();
-        objectUrl = URL.createObjectURL(blob);
-        const img = new Image();
-        img.onload = () => {
-          const canvas = canvasRef.current;
-          if (canvas) {
-            canvas.width = img.naturalWidth;
-            canvas.height = img.naturalHeight;
-            const ctx = canvas.getContext('2d');
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            ctx.drawImage(img, 0, 0);
-          }
-          resolve();
-        };
-        img.onerror = () => reject(new Error('تعذّر عرض الصفحة.'));
-        img.src = objectUrl;
-      }))
+    getPage(page)
+      .then((entry) => {
+        if (!alive) return;
+        const canvas = canvasRef.current;
+        if (canvas) {
+          canvas.width = entry.img.naturalWidth;
+          canvas.height = entry.img.naturalHeight;
+          const ctx = canvas.getContext('2d');
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(entry.img, 0, 0);
+        }
+        // جلب مسبق للتالي والسابق (بلا انتظار) — تنقّل فوري لاحقاً
+        [page + 1, page - 1].forEach((p) => {
+          if (p >= 1 && p <= pages) getPage(p).catch(() => {});
+        });
+      })
       .catch((e) => { if (alive) setError(e.message); })
-      .finally(() => {
-        if (alive) setLoading(false);
-        if (objectUrl) URL.revokeObjectURL(objectUrl); // لا يبقى في الذاكرة
-      });
+      .finally(() => { if (alive) setLoading(false); });
 
-    return () => { alive = false; if (objectUrl) URL.revokeObjectURL(objectUrl); };
+    return () => { alive = false; };
   }, [documentId, page, pages]);
 
   const go = (d) => setPage((p) => Math.min(pages || 1, Math.max(1, p + d)));
@@ -105,12 +127,6 @@ export default function ProtectedViewer({ documentId, title, viewerName, viewerP
           : (
             <div className="pv-canvas-wrap">
               <canvas ref={canvasRef} className="pv-canvas" />
-              {/* علامة مائية أمامية إضافية (تعزّز المحروقة داخل الصورة) */}
-              <div className="pv-watermark" aria-hidden="true">
-                {Array.from({ length: 40 }).map((_, i) => (
-                  <span key={i}>{viewerName} · {viewerPhone}</span>
-                ))}
-              </div>
               {loading && <div className="pv-loading">جارٍ التحميل…</div>}
             </div>
           )}

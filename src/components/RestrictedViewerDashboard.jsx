@@ -85,8 +85,6 @@ export default function RestrictedViewerDashboard() {
         <ProtectedViewer
           documentId={open.id}
           title={open.title}
-          viewerName={user.name}
-          viewerPhone={user.phone}
           onClose={() => setOpen(null)}
         />
       )}
