@@ -67,7 +67,7 @@ function MemosView({ tree, stages, reload, notify }) {
     // الرفع مع مؤشّر تقدّم حقيقي + حدّ حجم فوري (يتجنّب رفع ملف كامل ثم رفضه)
     upload: async (subjectId, file, onProgress) => {
       if (file.type !== 'application/pdf') { notify('يُقبل ملف PDF فقط.'); return; }
-      if (file.size > 50 * 1024 * 1024) { notify('أقصى حجم للملف 50 ميجابايت. قلّل جودة المسح الضوئي ثم أعد المحاولة.'); return; }
+      if (file.size > 100 * 1024 * 1024) { notify('أقصى حجم للملف 100 ميجابايت. قلّل جودة المسح الضوئي ثم أعد المحاولة.'); return; }
       const form = new FormData(); form.append('file', file);
       try {
         await uploadFile(`/subjects/${subjectId}/document`, form, { onProgress });
