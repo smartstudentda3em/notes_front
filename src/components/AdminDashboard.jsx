@@ -10,10 +10,11 @@ const ALL_STAGES = ['الابتدائي', 'المتوسط', 'الثانوي', '�
 export default function AdminDashboard() {
   const { user, setUser, logout } = useAuth();
   const isAdmin = user.role === 'admin_press';
+  const isViewerManager = user.role === 'viewer_manager';
   const canManage = isAdmin || user.scope === 'manage';
   const { toast, show } = useToast();
 
-  const [tab, setTab] = useState('teachers');
+  const [tab, setTab] = useState(isViewerManager ? 'viewers' : 'teachers');
   const [teachers, setTeachers] = useState([]);
   const [view, setView] = useState('list');
   const [current, setCurrent] = useState(null);
@@ -42,20 +43,26 @@ export default function AdminDashboard() {
   const askConfirm = (opts) => setConfirmReq(opts);            // {title, message, confirmLabel, onConfirm}
   const doPrint = (id, copies) => setPrintJob({ id, copies }); // طباعة مباشرة بعدد النسخ المُدخل في الكرت
 
-  const tabs = [
-    { id: 'teachers', label: 'المدرسون' },
-    ...(isAdmin ? [
-      { id: 'assistants', label: 'المساعدون' },
-      { id: 'viewers', label: 'المشاهدون' },
-      { id: 'prints', label: 'النسخ المطبوعة' },
-    ] : []),
-    { id: 'account', label: 'إعداداتي' },
-  ];
+  const tabs = isViewerManager
+    ? [
+        { id: 'viewers', label: 'المشاهدون' },
+        { id: 'account', label: 'إعداداتي' },
+      ]
+    : [
+        { id: 'teachers', label: 'المدرسون' },
+        ...(isAdmin ? [
+          { id: 'assistants', label: 'المساعدون' },
+          { id: 'viewers', label: 'المشاهدون' },
+          { id: 'viewer-managers', label: 'مسؤولو المشاهدين' },
+          { id: 'prints', label: 'النسخ المطبوعة' },
+        ] : []),
+        { id: 'account', label: 'إعداداتي' },
+      ];
 
   return (
     <div className="shell" onDragStart={(e) => e.preventDefault()}>
       <Topbar
-        subtitle={isAdmin ? 'لوحة المطبعة' : (user.scope === 'manage' ? 'مساعد (إدارة)' : 'مساعد (طباعة)')}
+        subtitle={isAdmin ? 'لوحة المطبعة' : isViewerManager ? 'مسؤول المشاهدين' : (user.scope === 'manage' ? 'مساعد (إدارة)' : 'مساعد (طباعة)')}
         name={user.name} tabs={tabs} activeTab={tab} onTab={(t) => { setTab(t); if (t !== 'teachers') back(); }} onLogout={logout}
       />
 
@@ -65,7 +72,8 @@ export default function AdminDashboard() {
           : <TeacherDetail key={current.id} teacher={current} tree={tree} onBack={back} onPrint={doPrint} />
       )}
       {tab === 'assistants' && isAdmin && <AssistantsPanel notify={show} askConfirm={askConfirm} />}
-      {tab === 'viewers' && isAdmin && <ViewersPanel notify={show} askConfirm={askConfirm} />}
+      {tab === 'viewers' && (isAdmin || isViewerManager) && <ViewersPanel notify={show} askConfirm={askConfirm} />}
+      {tab === 'viewer-managers' && isAdmin && <ViewerManagersPanel notify={show} askConfirm={askConfirm} />}
       {tab === 'prints' && isAdmin && <PrintLogsPanel teachers={teachers} notify={show} />}
       {tab === 'account' && <AdminAccount user={user} onUpdated={setUser} notify={show} />}
 
@@ -458,10 +466,10 @@ function ViewersPanel({ notify, askConfirm }) {
   );
 }
 
-function ViewerForm({ teachers, initial, onClose, onSaved }) {
-  const editing = !!initial;
-  const [name, setName] = useState(initial?.name || '');
-  const [phone, setPhone] = useState(initial?.phone || '');
+function ViewerForm({ teachers, initial, duplicate = false, onClose, onSaved }) {
+  const editing = !!initial && !duplicate; // التكرار = إنشاء جديد بنفس المدرّس والمصفوفة
+  const [name, setName] = useState(editing ? (initial?.name || '') : '');
+  const [phone, setPhone] = useState(editing ? (initial?.phone || '') : '');
   const [password, setPassword] = useState('');
   const [teacherId, setTeacherId] = useState(initial?.teacher_id || '');
   const [subjectIds, setSubjectIds] = useState(initial?.subject_ids || []);
@@ -483,7 +491,8 @@ function ViewerForm({ teachers, initial, onClose, onSaved }) {
   return (
     <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <form className="card stack modal" onSubmit={submit}>
-        <div className="between"><h3>{editing ? 'تعديل مشاهد' : 'مشاهد جديد'}</h3><button type="button" className="btn ghost sm" onClick={onClose}>إغلاق</button></div>
+        <div className="between"><h3>{editing ? 'تعديل مشاهد' : duplicate ? 'تكرار مشاهد (نسخة جديدة)' : 'مشاهد جديد'}</h3><button type="button" className="btn ghost sm" onClick={onClose}>إغلاق</button></div>
+        {duplicate && <div className="muted small">نسخة بنفس المدرّس والمواد — أدخل اسمًا ورقمًا وكلمة مرور جديدة.</div>}
         <input className="field" placeholder="الاسم" value={name} onChange={(e) => setName(e.target.value)} required />
         <input className="field" placeholder="رقم التليفون (اسم الدخول)" value={phone} onChange={(e) => setPhone(e.target.value)} required />
         {!editing && <input className="field" placeholder="كلمة المرور المبدئية" value={password} onChange={(e) => setPassword(e.target.value)} required />}
@@ -562,6 +571,7 @@ function SubjectMatrixPicker({ teacherId, value, onChange }) {
 
 function ViewerCard({ v, teachers, onChanged, askConfirm }) {
   const [editing, setEditing] = useState(false);
+  const [dup, setDup] = useState(false);
   const call = async (fn, ok) => { try { await fn(); onChanged(ok); } catch (e) { onChanged(e.message); } };
 
   return (
@@ -583,9 +593,11 @@ function ViewerCard({ v, teachers, onChanged, askConfirm }) {
       </div>
 
       {editing && <ViewerForm teachers={teachers} initial={v} onClose={() => setEditing(false)} onSaved={() => { setEditing(false); onChanged('تم تحديث المشاهد.'); }} />}
+      {dup && <ViewerForm teachers={teachers} initial={v} duplicate onClose={() => setDup(false)} onSaved={() => { setDup(false); onChanged('تم إنشاء نسخة من المشاهد.'); }} />}
 
       <div className="row" style={{ marginTop: 12 }}>
         <button className="btn soft sm" onClick={() => setEditing(true)}>تعديل الصلاحيات</button>
+        <button className="btn soft sm" onClick={() => setDup(true)}>📑 تكرار</button>
         <button className="btn ghost sm" onClick={() => { const password = prompt(`كلمة مرور جديدة لـ ${v.name}:`); if (password) call(() => api(`/admin/viewers/${v.id}/password`, { method: 'PUT', body: { password } }), 'تمت إعادة التعيين.'); }}>كلمة المرور</button>
         <button className="btn ghost sm" onClick={() => call(() => api(`/admin/viewers/${v.id}/toggle`, { method: 'PATCH' }), v.is_active ? 'تم الإيقاف.' : 'تم التفعيل.')}>{v.is_active ? 'إيقاف' : 'تفعيل'}</button>
         <button className="btn danger sm" onClick={() => askConfirm({
@@ -593,6 +605,100 @@ function ViewerCard({ v, teachers, onChanged, askConfirm }) {
           message: <>هل أنت متأكد من حذف المشاهد <b>{v.name}</b> نهائياً؟</>,
           confirmLabel: 'حذف المشاهد',
           onConfirm: () => call(() => api(`/admin/viewers/${v.id}`, { method: 'DELETE' }), 'تم حذف المشاهد.'),
+        })}>حذف</button>
+      </div>
+    </div>
+  );
+}
+
+/* =====================================================================
+ |  مسؤولو المشاهدين (إدارة — مدير المطبعة فقط)
+ ===================================================================== */
+function ViewerManagersPanel({ notify, askConfirm }) {
+  const [managers, setManagers] = useState([]);
+  const [adding, setAdding] = useState(false);
+
+  async function load() {
+    try { setManagers(await api('/admin/viewer-managers')); } catch (e) { notify(e.message); }
+  }
+  useEffect(() => { load(); }, []);
+
+  return (
+    <>
+      <div className="crumb"><span className="crumb-here">مسؤولو المشاهدين</span></div>
+      <div className="toolbar"><div className="between">
+        <span className="muted small">حسابات تدير المشاهدين فقط (إنشاء/تعديل/تكرار/حذف + صلاحياتهم) — لا تمسّ المدرّسين أو المساعدين.</span>
+        <button className="btn" onClick={() => setAdding(true)}>+ إضافة مسؤول</button>
+      </div></div>
+
+      {adding && <ViewerManagerForm onClose={() => setAdding(false)} onSaved={() => { setAdding(false); load(); notify('تم إنشاء مسؤول المشاهدين.'); }} />}
+
+      <div className="stack">
+        {managers.map((m) => (
+          <ViewerManagerCard key={m.id} m={m} askConfirm={askConfirm} onChanged={(msg) => { load(); notify(msg); }} />
+        ))}
+        {!managers.length && <div className="empty-note">لا يوجد مسؤولو مشاهدين بعد.</div>}
+      </div>
+    </>
+  );
+}
+
+function ViewerManagerForm({ initial, onClose, onSaved }) {
+  const editing = !!initial;
+  const [name, setName] = useState(initial?.name || '');
+  const [phone, setPhone] = useState(initial?.phone || '');
+  const [password, setPassword] = useState('');
+
+  async function submit(e) {
+    e.preventDefault();
+    try {
+      if (editing) await api(`/admin/viewer-managers/${initial.id}`, { method: 'PUT', body: { name, phone } });
+      else await api('/admin/viewer-managers', { method: 'POST', body: { name, phone, password } });
+      onSaved();
+    } catch (ex) { alert(ex.message); }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <form className="card stack modal" onSubmit={submit}>
+        <div className="between"><h3>{editing ? 'تعديل مسؤول المشاهدين' : 'مسؤول مشاهدين جديد'}</h3><button type="button" className="btn ghost sm" onClick={onClose}>إغلاق</button></div>
+        <input className="field" placeholder="الاسم" value={name} onChange={(e) => setName(e.target.value)} required />
+        <input className="field" placeholder="رقم التليفون (اسم الدخول)" value={phone} onChange={(e) => setPhone(e.target.value)} required />
+        {!editing && <input className="field" placeholder="كلمة المرور المبدئية" value={password} onChange={(e) => setPassword(e.target.value)} required />}
+        <button className="btn">{editing ? 'حفظ' : 'إنشاء الحساب'}</button>
+      </form>
+    </div>
+  );
+}
+
+function ViewerManagerCard({ m, onChanged, askConfirm }) {
+  const [editing, setEditing] = useState(false);
+  const call = async (fn, ok) => { try { await fn(); onChanged(ok); } catch (e) { onChanged(e.message); } };
+
+  return (
+    <div className="teacher-item">
+      <div className="between" style={{ alignItems: 'flex-start' }}>
+        <div className="hd">
+          <span className="avatar">🛡️</span>
+          <div style={{ minWidth: 0 }}>
+            <div className="nm">{m.name} {!m.is_active && <span className="mini-pill off">موقوف</span>}</div>
+            <div className="ph">{m.phone}</div>
+          </div>
+        </div>
+        <span className="status ok">مسؤول مشاهدين</span>
+      </div>
+
+      {editing && <ViewerManagerForm initial={m} onClose={() => setEditing(false)} onSaved={() => { setEditing(false); onChanged('تم تحديث البيانات.'); }} />}
+
+      <div className="row" style={{ marginTop: 12 }}>
+        <button className="btn soft sm" onClick={() => setEditing(true)}>تعديل</button>
+        <button className="btn ghost sm" onClick={() => { const password = prompt(`كلمة مرور جديدة لـ ${m.name}:`); if (password) call(() => api(`/admin/viewer-managers/${m.id}/password`, { method: 'PUT', body: { password } }), 'تمت إعادة التعيين.'); }}>كلمة المرور</button>
+        <button className="btn ghost sm" onClick={() => call(() => api(`/admin/viewer-managers/${m.id}/toggle`, { method: 'PATCH' }), m.is_active ? 'تم الإيقاف.' : 'تم التفعيل.')}>{m.is_active ? 'إيقاف' : 'تفعيل'}</button>
+        <button className="btn danger sm" onClick={() => askConfirm({
+          title: 'تأكيد حذف مسؤول المشاهدين',
+          message: <>هل أنت متأكد من حذف <b>{m.name}</b> نهائياً؟</>,
+          confirmLabel: 'حذف',
+          onConfirm: () => call(() => api(`/admin/viewer-managers/${m.id}`, { method: 'DELETE' }), 'تم الحذف.'),
         })}>حذف</button>
       </div>
     </div>
